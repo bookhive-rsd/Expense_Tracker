@@ -50,11 +50,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserInDB:
 @router.post("/google-login")
 async def google_login(request: GoogleLoginRequest):
     try:
-        # Verify Google token
+        # Verify Google token with increased clock skew for development
         idinfo = id_token.verify_oauth2_token(
             request.token, 
             requests.Request(), 
-            settings.GOOGLE_CLIENT_ID
+            settings.GOOGLE_CLIENT_ID,
+            clock_skew_in_seconds=60  # Allow 60 seconds for development
         )
         
         if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:

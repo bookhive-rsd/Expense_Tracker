@@ -51,15 +51,27 @@ class ExpenseCreate(BaseModel):
     notes: Optional[str] = None
     image_url: Optional[str] = None
     location: Optional[str] = None
+    is_group_expense: bool = False
+    group_id: Optional[str] = None
+    split_equally: bool = True
+    custom_splits: Optional[Dict[str, float]] = None
 
 class Expense(ExpenseCreate):
     user_id: str
     predicted_category: Optional[CategoryEnum] = None
     ai_suggestions: Optional[Dict] = None
+    is_group_expense: bool = False
+    group_id: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class ExpenseInDB(Expense):
     id: str = Field(alias="_id")
+
+    class Config:
+        populate_by_name = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
 class GroupMember(BaseModel):
     user_id: str

@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from typing import List, Optional, Any, Dict
+from typing import List, Optional
 from datetime import datetime, timedelta
 from bson import ObjectId
 
@@ -36,16 +36,90 @@ async def create_expense(
     expense_dict["ai_suggestions"] = ai_suggestions
     expense_dict["created_at"] = datetime.utcnow()
     
-    result = await db.expenses.insert_one(expense_dict)
-    created_expense = await db.expenses.find_one({"_id": result.inserted_id})
-    if created_expense is None:
-        # Fallback: construct a created_expense from the inserted data if the find returned None
-        created_expense = expense_dict.copy()
-        created_expense["_id"] = str(result.inserted_id)
+    # If it's a group expense, also add to group
+    if expense.is_group_expense and expense.group_id:
+        try:
+            # Verify group_id is a valid ObjectId
+            if not ObjectId.is_valid(expense.group_id):
+                raise HTTPException(status_code=400, detail=f"Invalid group_id format: {expense.group_id}")
+            
+            # Verify user has access to the group
+            group = await db.groups.find_one({"_id": ObjectId(expense.group_id)})
+            
+            if not group:
+                raise HTTPException(status_code=404, detail="Group not found")
+            
+            # Check if user is owner or member
+            is_owner = str(group["owner_id"]) == current_user.id
+            is_member = any(m["user_id"] == current_user.id for m in group.get("members", []))
+            
+            if not (is_owner or is_member):
+                raise HTTPException(status_code=403, detail="Not a member of this group")
+            
+            # Calculate splits
+            splits = {}
+            num_members = len(group["members"]) + 1  # +1 for owner
+            
+            if expense.split_equally:
+                per_person = expense.amount / num_members
+                splits[group["owner_id"]] = per_person
+                for member in group["members"]:
+                    splits[member["user_id"]] = per_person
+            else:
+                splits = expense.custom_splits or {}
+            
+            # Add expense to group
+            group_expense = {
+                "description": expense.item_name,
+                "total_amount": expense.amount,
+                "paid_by": current_user.id,
+                "split_type": "equal" if expense.split_equally else "custom",
+                "splits": splits,
+                "date": expense.date,
+                "category": expense.category,
+                "expense_id": None  # Will be set after creating personal expense
+            }
+            
+            # Update group balances
+            balances = group.get("balances", {})
+            for user_id, amount in splits.items():
+                if user_id != current_user.id:
+                    if user_id not in balances:
+                        balances[user_id] = {}
+                    current_owed = balances[user_id].get(current_user.id, 0)
+                    balances[user_id][current_user.id] = current_owed + amount
+            
+            # Save expense first
+            result = await db.expenses.insert_one(expense_dict)
+            expense_id = str(result.inserted_id)
+            
+            # Update group expense with expense_id
+            group_expense["expense_id"] = expense_id
+            
+            # Add to group
+            await db.groups.update_one(
+                {"_id": ObjectId(expense.group_id)},
+                {
+                    "$push": {"expenses": group_expense},
+                    "$set": {"balances": balances}
+                }
+            )
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"Error adding expense to group: {e}")
+            # Continue anyway - expense is saved even if group update fails
     else:
-        created_expense["_id"] = str(created_expense["_id"])
+        # Regular personal expense
+        result = await db.expenses.insert_one(expense_dict)
+        expense_id = str(result.inserted_id)
     
-    return ExpenseInDB(**created_expense)
+    created_expense = await db.expenses.find_one({"_id": ObjectId(expense_id)})
+    created_expense["_id"] = str(created_expense["_id"])
+    created_expense["id"] = str(created_expense["_id"])  # Add id field
+    
+    return created_expense
 
 @router.get("/", response_model=List[ExpenseInDB])
 async def get_expenses(
@@ -58,7 +132,7 @@ async def get_expenses(
     current_user: UserInDB = Depends(get_current_user)
 ):
     db = await get_database()
-    query: Dict[str, Any] = {"user_id": current_user.id}
+    query = {"user_id": current_user.id}
     
     if category:
         query["category"] = category
@@ -79,10 +153,14 @@ async def get_expenses(
     cursor = db.expenses.find(query).sort("date", -1).skip(skip).limit(limit)
     expenses = await cursor.to_list(length=limit)
     
+    result = []
     for expense in expenses:
-        expense["_id"] = str(expense["_id"])
+        expense_id = str(expense["_id"])
+        expense["_id"] = expense_id
+        expense["id"] = expense_id  # Add id field explicitly
+        result.append(expense)
     
-    return [ExpenseInDB(**expense) for expense in expenses]
+    return result
 
 @router.get("/{expense_id}", response_model=ExpenseInDB)
 async def get_expense(
@@ -124,9 +202,7 @@ async def update_expense(
         {"$set": update_dict}
     )
     
-    updated_expense = await db.expenses.find_one({"_id": ObjectId(expense_id), "user_id": current_user.id})
-    if not updated_expense:
-        raise HTTPException(status_code=404, detail="Expense not found after update")
+    updated_expense = await db.expenses.find_one({"_id": ObjectId(expense_id)})
     updated_expense["_id"] = str(updated_expense["_id"])
     
     return ExpenseInDB(**updated_expense)

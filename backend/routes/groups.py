@@ -22,43 +22,82 @@ async def create_group(
     """Create a new expense group"""
     db = await get_database()
     
+    print(f"Creating group: {request.name}")
+    print(f"Members received: {request.members}")
+    
+    # Process members and try to find matching users by email
+    processed_members = []
+    for member in request.members:
+        member_dict = {
+            "name": member.name,
+            "email": member.email,
+            "user_id": member.user_id
+        }
+        
+        print(f"Processing member: {member_dict}")
+        
+        # Try to find user by email in database
+        existing_user = await db.users.find_one({"email": member.email})
+        if existing_user:
+            # Use actual user_id if found
+            member_dict["user_id"] = str(existing_user["_id"])
+            print(f"Found existing user for {member.email}: {member_dict['user_id']}")
+        else:
+            print(f"No user found for {member.email}, using temp ID")
+        
+        processed_members.append(member_dict)
+    
     group_dict = {
         "name": request.name,
         "owner_id": current_user.id,
-        "members": [member.dict() for member in request.members],
+        "members": processed_members,
         "expenses": [],
         "balances": {},
         "created_at": datetime.utcnow()
     }
     
+    print(f"Inserting group: {group_dict}")
+    
     result = await db.groups.insert_one(group_dict)
     created_group = await db.groups.find_one({"_id": result.inserted_id})
+    
+    print(f"Group created: {created_group}")
+    
+    created_group["id"] = str(created_group["_id"])
     created_group["_id"] = str(created_group["_id"])
     
-    return GroupInDB(**created_group)
+    return created_group
 
 @router.get("/", response_model=List[GroupInDB])
 async def get_user_groups(
     current_user: UserInDB = Depends(get_current_user)
 ):
-    """Get all groups user is part of"""
+    """Get all groups user is part of (as owner or member)"""
     db = await get_database()
     
-    # Find groups where user is owner or member
-    query = {
+    print(f"Fetching groups for user: {current_user.id}, email: {current_user.email}")
+    
+    # Find groups where user is owner OR member
+    cursor = db.groups.find({
         "$or": [
             {"owner_id": current_user.id},
-            {"members.user_id": current_user.id}
+            {"members.user_id": current_user.id},
+            {"members.email": current_user.email}
         ]
-    }
+    }).sort("created_at", -1)
     
-    cursor = db.groups.find(query).sort("created_at", -1)
     groups = await cursor.to_list(length=100)
     
-    for group in groups:
-        group["_id"] = str(group["_id"])
+    print(f"Found {len(groups)} groups")
     
-    return [GroupInDB(**group) for group in groups]
+    result = []
+    for group in groups:
+        group["id"] = str(group["_id"])
+        group["_id"] = str(group["_id"])
+        print(f"Group: {group.get('name')}, ID: {group['id']}, Members: {len(group.get('members', []))}")
+        result.append(group)
+    
+    return result
 
 @router.get("/{group_id}", response_model=GroupInDB)
 async def get_group(

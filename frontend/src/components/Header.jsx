@@ -7,10 +7,11 @@ const Header = ({ toggleSidebar }) => {
   const { user, logout } = useAuth();
   const { darkMode, toggleDarkMode } = useTheme();
   const [showNotifications, setShowNotifications] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(1); // Track unread count
   const notificationRef = useRef(null);
   
   const notifications = [
-    { id: 1, message: "Welcome to AI Expense Tracker!", type: "info", time: "Just now" },
+    { id: 1, message: "Welcome to AI Expense Tracker!", type: "info", time: "Just now", read: false },
   ];
 
   // Close notifications when clicking outside
@@ -23,6 +24,8 @@ const Header = ({ toggleSidebar }) => {
 
     if (showNotifications) {
       document.addEventListener('mousedown', handleClickOutside);
+      // Mark as read when opened
+      setUnreadCount(0);
     }
 
     return () => {
@@ -52,7 +55,7 @@ const Header = ({ toggleSidebar }) => {
         {/* Right side */}
         <div className="flex items-center space-x-4">
           {/* Notifications */}
-          <div className="relative">
+          <div className="relative" ref={notificationRef}>
             <button 
               onClick={() => setShowNotifications(!showNotifications)}
               className="relative text-gray-600 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"

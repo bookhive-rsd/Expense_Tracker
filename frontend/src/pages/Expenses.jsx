@@ -101,14 +101,24 @@ const Expenses = () => {
   };
 
   const handleDelete = async (expenseId) => {
+    console.log('Delete clicked for expense ID:', expenseId);
+    
+    if (!expenseId || expenseId === 'undefined') {
+      alert('Error: Invalid expense ID. Please refresh the page and try again.');
+      console.error('Invalid expense ID:', expenseId);
+      return;
+    }
+    
     if (!window.confirm('Are you sure you want to delete this expense?')) return;
     
     try {
+      console.log(`Deleting expense: ${expenseId}`);
       await axios.delete(`${API_URL}/api/expenses/${expenseId}`);
       alert('Expense deleted successfully!');
       fetchExpenses();
     } catch (error) {
       console.error('Error deleting expense:', error);
+      console.error('Error response:', error.response?.data);
       alert('Failed to delete expense: ' + (error.response?.data?.detail || error.message));
     }
   };
@@ -230,16 +240,42 @@ const Expenses = () => {
                 
                 <div className="flex items-center space-x-4">
                   <div className="text-right">
-                    <p className="text-2xl font-bold text-gray-900 dark:text-white">
-                      ₹{expense.amount.toFixed(2)}
-                    </p>
+                    {expense.is_member_view && expense.user_share !== undefined ? (
+                      <div>
+                        <p className="text-sm text-gray-500 dark:text-gray-400">
+                          Your share
+                        </p>
+                        <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+                          ₹{expense.user_share.toFixed(2)}
+                        </p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                          of ₹{expense.amount.toFixed(2)}
+                        </p>
+                      </div>
+                    ) : expense.is_group_expense ? (
+                      <div>
+                        <p className="text-sm text-gray-500 dark:text-gray-400">
+                          You paid
+                        </p>
+                        <p className="text-2xl font-bold text-gray-900 dark:text-white">
+                          ₹{expense.amount.toFixed(2)}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="text-2xl font-bold text-gray-900 dark:text-white">
+                        ₹{expense.amount.toFixed(2)}
+                      </p>
+                    )}
                   </div>
-                  <button
-                    onClick={() => handleDelete(expense.id || expense._id)}
-                    className="text-red-600 hover:text-red-800 dark:text-red-400"
-                  >
-                    <Trash2 className="w-5 h-5" />
-                  </button>
+                  {!expense.is_member_view && (
+                    <button
+                      onClick={() => handleDelete(expense.id || expense._id)}
+                      className="text-red-600 hover:text-red-800 dark:text-red-400"
+                      title="Delete expense"
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

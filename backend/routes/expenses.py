@@ -132,6 +132,8 @@ async def get_expenses(
     current_user: UserInDB = Depends(get_current_user)
 ):
     db = await get_database()
+    
+    # Query for personal expenses
     query = {"user_id": current_user.id}
     
     if category:
@@ -150,14 +152,68 @@ async def get_expenses(
             {"notes": {"$regex": search, "$options": "i"}}
         ]
     
+    # Get personal expenses
     cursor = db.expenses.find(query).sort("date", -1).skip(skip).limit(limit)
     expenses = await cursor.to_list(length=limit)
     
+    # Also get group expenses where user is a member
+    # Find all groups user is part of
+    groups = await db.groups.find({
+        "$or": [
+            {"owner_id": current_user.id},
+            {"members.user_id": current_user.id},
+            {"members.email": current_user.email}
+        ]
+    }).to_list(length=100)
+    
+    group_ids = [str(g["_id"]) for g in groups]
+    
+    # Get group expenses from other users in these groups
+    if group_ids:
+        group_expense_query = {
+            "is_group_expense": True,
+            "group_id": {"$in": group_ids},
+            "user_id": {"$ne": current_user.id}  # Don't duplicate user's own expenses
+        }
+        
+        if category:
+            group_expense_query["category"] = category
+        if "date" in query:
+            group_expense_query["date"] = query["date"]
+        if search and "$or" in query:
+            group_expense_query["$or"] = query["$or"]
+        
+        group_expenses = await db.expenses.find(group_expense_query).sort("date", -1).to_list(length=100)
+        
+        # Mark these as "viewed" group expenses and calculate user's share
+        for exp in group_expenses:
+            exp["is_member_view"] = True  # Flag to show it's viewed as member
+            
+            # Calculate user's share
+            group_id = exp.get('group_id')
+            if group_id:
+                try:
+                    group = await db.groups.find_one({"_id": ObjectId(group_id)})
+                    if group:
+                        for group_exp in group.get('expenses', []):
+                            if group_exp.get('expense_id') == str(exp['_id']):
+                                user_share = group_exp.get('splits', {}).get(current_user.id, 0)
+                                exp["user_share"] = user_share
+                                break
+                except:
+                    pass
+        
+        # Combine personal and group expenses
+        expenses.extend(group_expenses)
+        
+        # Sort combined list by date
+        expenses.sort(key=lambda x: x.get('date', datetime.min), reverse=True)
+    
     result = []
-    for expense in expenses:
+    for expense in expenses[:limit]:  # Apply limit to combined results
         expense_id = str(expense["_id"])
         expense["_id"] = expense_id
-        expense["id"] = expense_id  # Add id field explicitly
+        expense["id"] = expense_id
         result.append(expense)
     
     return result
@@ -214,6 +270,53 @@ async def delete_expense(
 ):
     db = await get_database()
     
+    # First get the expense to check if it's a group expense
+    expense = await db.expenses.find_one({
+        "_id": ObjectId(expense_id),
+        "user_id": current_user.id
+    })
+    
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense not found")
+    
+    # If it's a group expense, also remove from group
+    if expense.get('is_group_expense') and expense.get('group_id'):
+        try:
+            group_id = expense.get('group_id')
+            
+            # Remove expense from group's expenses array
+            await db.groups.update_one(
+                {"_id": ObjectId(group_id)},
+                {"$pull": {"expenses": {"expense_id": expense_id}}}
+            )
+            
+            # Recalculate balances after removing expense
+            group = await db.groups.find_one({"_id": ObjectId(group_id)})
+            if group:
+                # Recalculate balances from remaining expenses
+                new_balances = {}
+                for exp in group.get('expenses', []):
+                    paid_by = exp.get('paid_by')
+                    splits = exp.get('splits', {})
+                    
+                    for user_id, amount in splits.items():
+                        if user_id != paid_by:
+                            if user_id not in new_balances:
+                                new_balances[user_id] = {}
+                            current = new_balances[user_id].get(paid_by, 0)
+                            new_balances[user_id][paid_by] = current + amount
+                
+                await db.groups.update_one(
+                    {"_id": ObjectId(group_id)},
+                    {"$set": {"balances": new_balances}}
+                )
+            
+            print(f"Removed expense {expense_id} from group {group_id}")
+        except Exception as e:
+            print(f"Error removing from group: {e}")
+            # Continue anyway - at least delete the expense
+    
+    # Delete the expense
     result = await db.expenses.delete_one({
         "_id": ObjectId(expense_id),
         "user_id": current_user.id
@@ -242,10 +345,15 @@ async def get_expense_totals(
     
     start_date = period_map[period]
     
-    pipeline = [
+    # Get personal expenses
+    personal_pipeline = [
         {"$match": {
             "user_id": current_user.id,
-            "date": {"$gte": start_date}
+            "date": {"$gte": start_date},
+            "$or": [
+                {"is_group_expense": {"$exists": False}},
+                {"is_group_expense": False}
+            ]
         }},
         {"$group": {
             "_id": "$category",
@@ -255,12 +363,76 @@ async def get_expense_totals(
         {"$sort": {"total": -1}}
     ]
     
-    results = await db.expenses.aggregate(pipeline).to_list(length=100)
+    personal_results = await db.expenses.aggregate(personal_pipeline).to_list(length=100)
     
-    total_amount = sum(item["total"] for item in results)
+    # Get group expenses and calculate user's share
+    group_expenses = await db.expenses.find({
+        "user_id": current_user.id,
+        "is_group_expense": True,
+        "date": {"$gte": start_date}
+    }).to_list(length=1000)
+    
+    # Calculate user's share from group expenses
+    group_share_by_category = {}
+    for expense in group_expenses:
+        group_id = expense.get('group_id')
+        if not group_id:
+            continue
+        
+        try:
+            # Get the group to find the split
+            group = await db.groups.find_one({"_id": ObjectId(group_id)})
+            if not group:
+                continue
+            
+            # Find this expense in the group
+            for group_exp in group.get('expenses', []):
+                if group_exp.get('expense_id') == str(expense['_id']):
+                    # Get user's share from splits
+                    user_share = group_exp.get('splits', {}).get(current_user.id, 0)
+                    category = expense.get('category', 'other')
+                    
+                    if category not in group_share_by_category:
+                        group_share_by_category[category] = {"total": 0, "count": 0}
+                    
+                    group_share_by_category[category]["total"] += user_share
+                    group_share_by_category[category]["count"] += 1
+                    break
+        except Exception as e:
+            print(f"Error calculating group share: {e}")
+            continue
+    
+    # Combine personal and group expenses
+    combined_results = {}
+    
+    # Add personal expenses
+    for result in personal_results:
+        category = result["_id"]
+        combined_results[category] = {
+            "_id": category,
+            "total": result["total"],
+            "count": result["count"]
+        }
+    
+    # Add group expense shares
+    for category, data in group_share_by_category.items():
+        if category in combined_results:
+            combined_results[category]["total"] += data["total"]
+            combined_results[category]["count"] += data["count"]
+        else:
+            combined_results[category] = {
+                "_id": category,
+                "total": data["total"],
+                "count": data["count"]
+            }
+    
+    # Convert to list and sort
+    final_results = sorted(combined_results.values(), key=lambda x: x["total"], reverse=True)
+    
+    total_amount = sum(item["total"] for item in final_results)
     
     return {
         "period": period,
         "total_amount": total_amount,
-        "by_category": results
+        "by_category": final_results
     }

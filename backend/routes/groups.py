@@ -22,9 +22,6 @@ async def create_group(
     """Create a new expense group"""
     db = await get_database()
     
-    print(f"Creating group: {request.name}")
-    print(f"Members received: {request.members}")
-    
     # Process members and try to find matching users by email
     processed_members = []
     for member in request.members:
@@ -34,16 +31,10 @@ async def create_group(
             "user_id": member.user_id
         }
         
-        print(f"Processing member: {member_dict}")
-        
         # Try to find user by email in database
         existing_user = await db.users.find_one({"email": member.email})
         if existing_user:
-            # Use actual user_id if found
             member_dict["user_id"] = str(existing_user["_id"])
-            print(f"Found existing user for {member.email}: {member_dict['user_id']}")
-        else:
-            print(f"No user found for {member.email}, using temp ID")
         
         processed_members.append(member_dict)
     
@@ -56,12 +47,8 @@ async def create_group(
         "created_at": datetime.utcnow()
     }
     
-    print(f"Inserting group: {group_dict}")
-    
     result = await db.groups.insert_one(group_dict)
     created_group = await db.groups.find_one({"_id": result.inserted_id})
-    
-    print(f"Group created: {created_group}")
     
     created_group["id"] = str(created_group["_id"])
     created_group["_id"] = str(created_group["_id"])
@@ -75,9 +62,6 @@ async def get_user_groups(
     """Get all groups user is part of (as owner or member)"""
     db = await get_database()
     
-    print(f"Fetching groups for user: {current_user.id}, email: {current_user.email}")
-    
-    # Find groups where user is owner OR member
     cursor = db.groups.find({
         "$or": [
             {"owner_id": current_user.id},
@@ -88,13 +72,10 @@ async def get_user_groups(
     
     groups = await cursor.to_list(length=100)
     
-    print(f"Found {len(groups)} groups")
-    
     result = []
     for group in groups:
         group["id"] = str(group["_id"])
         group["_id"] = str(group["_id"])
-        print(f"Group: {group.get('name')}, ID: {group['id']}, Members: {len(group.get('members', []))}")
         result.append(group)
     
     return result
@@ -120,6 +101,7 @@ async def get_group(
         raise HTTPException(status_code=403, detail="Access denied")
     
     group["_id"] = str(group["_id"])
+    group["id"] = str(group["_id"])
     return GroupInDB(**group)
 
 @router.post("/{group_id}/expenses")
@@ -144,24 +126,13 @@ async def add_group_expense(
         raise HTTPException(status_code=403, detail="Not a group member")
     
     expense_dict = expense.dict()
-    
-    # Calculate splits if equal split
-    if expense.split_type == "equal":
-        num_members = len(group["members"]) + 1  # +1 for owner
-        per_person = expense.total_amount / num_members
-        
-        splits = {group["owner_id"]: per_person}
-        for member in group["members"]:
-            splits[member["user_id"]] = per_person
-        
-        expense_dict["splits"] = splits
-    
-    # Update balances
-    balances = group.get("balances", {})
     paid_by = expense.paid_by
     
+    # Update balances - only people who didn't pay owe the payer
+    balances = group.get("balances", {})
+    
     for user_id, amount in expense_dict["splits"].items():
-        if user_id != paid_by:
+        if user_id != paid_by and amount > 0:
             # This person owes the payer
             if user_id not in balances:
                 balances[user_id] = {}
@@ -169,12 +140,47 @@ async def add_group_expense(
             current_owed = balances[user_id].get(paid_by, 0)
             balances[user_id][paid_by] = current_owed + amount
     
+    # Simplify balances - net out reciprocal debts
+    # If A owes B $50 and B owes A $30, simplify to A owes B $20
+    simplified_balances = {}
+    for debtor_id in list(balances.keys()):
+        if debtor_id not in simplified_balances:
+            simplified_balances[debtor_id] = {}
+        
+        for creditor_id, amount_owed in list(balances[debtor_id].items()):
+            # Check if creditor also owes debtor
+            reverse_debt = balances.get(creditor_id, {}).get(debtor_id, 0)
+            
+            if reverse_debt > 0:
+                # Net out the debts
+                net_amount = amount_owed - reverse_debt
+                
+                if net_amount > 0.01:  # Debtor still owes creditor
+                    simplified_balances[debtor_id][creditor_id] = net_amount
+                elif net_amount < -0.01:  # Creditor owes debtor
+                    if creditor_id not in simplified_balances:
+                        simplified_balances[creditor_id] = {}
+                    simplified_balances[creditor_id][debtor_id] = abs(net_amount)
+                # If essentially zero, don't add to simplified balances
+                
+                # Clear the reverse debt since we've processed it
+                if creditor_id in balances and debtor_id in balances[creditor_id]:
+                    balances[creditor_id][debtor_id] = 0
+            else:
+                # No reverse debt, just add to simplified
+                if amount_owed > 0.01:
+                    simplified_balances[debtor_id][creditor_id] = amount_owed
+        
+        # Clean up empty entries
+        if not simplified_balances[debtor_id]:
+            del simplified_balances[debtor_id]
+    
     # Add expense and update group
     await db.groups.update_one(
         {"_id": ObjectId(group_id)},
         {
             "$push": {"expenses": expense_dict},
-            "$set": {"balances": balances}
+            "$set": {"balances": simplified_balances}
         }
     )
     
@@ -201,8 +207,11 @@ async def settle_balance(
         current_owed = balances[from_user][to_user]
         new_balance = current_owed - amount
         
-        if new_balance <= 0:
+        if new_balance <= 0.01:  # Essentially paid off
             del balances[from_user][to_user]
+            # Clean up empty entries
+            if not balances[from_user]:
+                del balances[from_user]
         else:
             balances[from_user][to_user] = new_balance
         

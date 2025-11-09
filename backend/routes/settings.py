@@ -15,19 +15,52 @@ async def update_user_settings(
     """Update user preferences"""
     db = await get_database()
     
-    await db.users.update_one(
+    print(f"Updating settings for user {current_user.id}")
+    print(f"New settings: {settings.dict()}")
+    
+    result = await db.users.update_one(
         {"_id": ObjectId(current_user.id)},
         {"$set": {"settings": settings.dict()}}
     )
     
-    return {"message": "Settings updated successfully", "settings": settings}
+    print(f"Update result: matched={result.matched_count}, modified={result.modified_count}")
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Fetch updated user to confirm
+    updated_user = await db.users.find_one({"_id": ObjectId(current_user.id)})
+    print(f"Updated user settings: {updated_user.get('settings')}")
+    
+    return {
+        "message": "Settings updated successfully", 
+        "settings": settings.dict()
+    }
 
 @router.get("/preferences")
 async def get_user_settings(
     current_user: UserInDB = Depends(get_current_user)
 ):
     """Get user preferences"""
-    return current_user.settings
+    db = await get_database()
+    
+    # Fetch fresh user data from database
+    user = await db.users.find_one({"_id": ObjectId(current_user.id)})
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    settings = user.get("settings")
+    
+    print(f"Fetched settings for user {current_user.id}: {settings}")
+    
+    if not settings:
+        # Return default settings if none exist
+        default_settings = UserSettings()
+        print(f"No settings found, returning defaults: {default_settings.dict()}")
+        return default_settings.dict()
+    
+    return settings
 
 @router.post("/budgets")
 async def create_budget_goal(

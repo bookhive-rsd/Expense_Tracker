@@ -74,7 +74,7 @@ const Groups = () => {
 
   const handleViewDetails = async (group) => {
     try {
-      const response = await axios.get(`${API_URL}/api/groups/${group.id}`);
+      const response = await axios.get(`${API_URL}/api/groups/${group._id}`);
       setSelectedGroup(response.data);
       setShowDetails(true);
     } catch (error) {
@@ -127,7 +127,7 @@ const Groups = () => {
       total_amount: '',
       category: 'food',
       date: new Date().toISOString().split('T')[0],
-      paid_by: user.id,
+      paid_by: user._id,
       split_type: 'equal',
       splits: initialSplits
     });
@@ -193,7 +193,7 @@ const Groups = () => {
     }
     
     try {
-      await axios.post(`${API_URL}/api/groups/${selectedGroup.id}/expenses`, {
+      await axios.post(`${API_URL}/api/groups/${selectedGroup._id}/expenses`, {
         description: expenseFormData.description,
         total_amount: totalAmount,
         paid_by: expenseFormData.paid_by,
@@ -230,7 +230,7 @@ const Groups = () => {
     
     try {
       await axios.post(
-        `${API_URL}/api/groups/${selectedGroup.id}/settle`,
+        `${API_URL}/api/groups/${selectedGroup._id}/settle`,
         null,
         {
           params: {
@@ -334,7 +334,7 @@ const Groups = () => {
             
             return (
               <div
-                key={group.id}
+                key={group._id}
                 className="bg-white dark:bg-gray-800 rounded-lg shadow hover:shadow-lg transition"
               >
                 <div className="p-6">

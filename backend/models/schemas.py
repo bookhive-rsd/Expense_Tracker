@@ -31,16 +31,23 @@ class UserSettings(BaseModel):
     monthly_report: bool = True
     yearly_report: bool = True
 
+    class Config:
+        # Allow extra fields to be ignored
+        extra = "ignore"
+
 class User(BaseModel):
     email: EmailStr
     google_id: str
     name: str
     profile_pic: Optional[str] = None
-    settings: UserSettings = UserSettings()
+    settings: UserSettings = Field(default_factory=UserSettings)
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class UserInDB(User):
     id: str = Field(alias="_id")
+
+    class Config:
+        populate_by_name = True
 
 class ExpenseCreate(BaseModel):
     item_name: str
@@ -97,6 +104,9 @@ class Group(BaseModel):
 
 class GroupInDB(Group):
     id: str = Field(alias="_id")
+
+    class Config:
+        populate_by_name = True
 
 class BudgetGoal(BaseModel):
     period: str = "monthly"  # weekly, monthly

@@ -4,7 +4,7 @@ from pydantic import Field, field_validator
 
 class Settings(BaseSettings):
     # MongoDB
-    MONGO_URI: str = "mongodb://localhost:27017/expense_tracker"
+    MONGO_URI: str = "mongodb+srv://bookhiversd:8D6pLujBM9rLVi8B@bookhive.7h76ryz.mongodb.net/Expense_Tracker?retryWrites=true&w=majority&appName=BookHive"
     DATABASE_NAME: str = "expense_tracker"
     
     # JWT

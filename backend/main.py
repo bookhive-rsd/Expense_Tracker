@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import uvicorn
 
+
 from config.settings import settings
 from database.mongo import connect_to_mongo, close_mongo_connection
 from routes import auth, expenses, groups, analytics, ai, settings as settings_routes
